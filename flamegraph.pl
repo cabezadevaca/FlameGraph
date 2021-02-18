@@ -125,6 +125,7 @@ my $titleinverted = "Icicle Graph";	#   "    "
 my $searchcolor = "rgb(230,0,230)";	# color for search highlighting
 my $notestext = "";		# embedded notes in SVG
 my $subtitletext = "";		# second level title (optional)
+my $diffcallees = 0;            #include collees functions deltas into their caller delta
 my $help = 0;
 
 sub usage {
@@ -149,6 +150,7 @@ USAGE: $0 [options] infile > outfile.svg\n
 	--reverse        # generate stack-reversed flame graph
 	--inverted       # icicle graph
 	--flamechart     # produce a flame chart (sort by time, do not merge stacks)
+    --diffcallees    # include callees functions deltas into their caller delta
 	--negate         # switch differential hues (blue<->red)
 	--notes TEXT     # add notes comment in SVG (for debugging)
 	--help           # this message
@@ -182,6 +184,7 @@ GetOptions(
 	'flamechart'  => \$flamechart,
 	'negate'      => \$negate,
 	'notes=s'     => \$notestext,
+    'diffcallees' => \$diffcallees,
 	'help'        => \$help,
 ) or usage();
 $help && usage();
@@ -554,10 +557,11 @@ sub read_palette {
 
 my %Node;	# Hash of merged frame data
 my %Tmp;
+my $maxdelta2 = 1;
 
 # flow() merges two stacks, storing the merged frames and value data in %Node.
 sub flow {
-	my ($last, $this, $v, $d) = @_;
+	my ($last, $this, $v, $d, $v2) = @_;
 
 	my $len_a = @$last - 1;
 	my $len_b = @$this - 1;
@@ -575,8 +579,15 @@ sub flow {
 		# a unique ID is constructed from "func;depth;etime";
 		# func-depth isn't unique, it may be repeated later.
 		$Node{"$k;$v"}->{stime} = delete $Tmp{$k}->{stime};
+
 		if (defined $Tmp{$k}->{delta}) {
 			$Node{"$k;$v"}->{delta} = delete $Tmp{$k}->{delta};
+            # if file has delta format save time2 and etime2 for this ID
+		    $Node{"$k;$v"}->{stime2} = delete $Tmp{$k}->{stime2};
+    		$Node{"$k;$v"}->{etime2} = $v2;
+            # calculate new delta to be used when diffcallees option is set
+            my $d2 = ($v - $Node{"$k;$v"}->{stime}) - ($v2 - $Node{"$k;$v"}->{stime2});
+		    $maxdelta2 = abs($d2) if abs($d2) > $maxdelta2;
 		}
 		delete $Tmp{$k};
 	}
@@ -585,11 +596,13 @@ sub flow {
 		my $k = "$this->[$i];$i";
 		$Tmp{$k}->{stime} = $v;
 		if (defined $d) {
-			$Tmp{$k}->{delta} += $i == $len_b ? $d : 0;
+            $Tmp{$k}->{delta} += $i == $len_b ? $d : 0;
+            #save time2 for differential flamechart
+    		$Tmp{$k}->{stime2} = $v2;
 		}
 	}
 
-        return $this;
+    return $this;
 }
 
 # parse input
@@ -597,6 +610,7 @@ my @Data;
 my @SortedData;
 my $last = [];
 my $time = 0;
+my $time2 = 0;
 my $delta = undef;
 my $ignored = 0;
 my $line;
@@ -669,15 +683,17 @@ foreach (@SortedData) {
 	}
 
 	# merge frames and populate %Node:
-	$last = flow($last, [ '', split ";", $stack ], $time, $delta);
+	$last = flow($last, [ '', split ";", $stack ], $time, $delta, $time2);
 
 	if (defined $samples2) {
 		$time += $samples2;
+        # count up time2 which is "baseline" number of samples
+        $time2 += $samples;
 	} else {
 		$time += $samples;
 	}
 }
-flow($last, [], $time, $delta);
+flow($last, [], $time, $delta, $time2);
 
 warn "Ignored $ignored lines with invalid format\n" if $ignored;
 unless ($time) {
@@ -1108,6 +1124,9 @@ while (my ($id, $node) = each %Node) {
 	my ($func, $depth, $etime) = split ";", $id;
 	my $stime = $node->{stime};
 	my $delta = $node->{delta};
+    my $delta2 = undef;
+    my $stime2 = $node->{stime2};
+    my $etime2 = $node->{etime2};
 
 	$etime = $timemax if $func eq "" and $depth == 0;
 
@@ -1123,6 +1142,7 @@ while (my ($id, $node) = each %Node) {
 	}
 
 	my $samples = sprintf "%.0f", ($etime - $stime) * $factor;
+
 	(my $samples_txt = $samples) # add commas per perlfaq5
 		=~ s/(^[-+]?\d+?(?=(?>(?:\d{3})+)(?!\d))|\G\d{3}(?=\d))/$1,/g;
 
@@ -1144,7 +1164,17 @@ while (my ($id, $node) = each %Node) {
 			my $d = $negate ? -$delta : $delta;
 			my $deltapct = sprintf "%.2f", ((100 * $d) / ($timemax * $factor));
 			$deltapct = $d > 0 ? "+$deltapct" : $deltapct;
-			$info = "$escaped_func ($samples_txt $countname, $pct%; $deltapct%)";
+
+
+            my $samples2 = sprintf "%.0f", ($etime2 - $stime2) * $factor;
+            $delta2 = $samples - $samples2;
+            my $d2 = $negate ? -$delta2 : $delta2;
+			my $deltapct2 = sprintf "%.2f", ((100 * $d2) / ($timemax * $factor));
+			$deltapct2 = $d2 > 0 ? "+$deltapct2" : $deltapct2;
+            (my $samples_txt2 = $samples2) # add commas per perlfaq5  
+               =~ s/(^[-+]?\d+?(?=(?>(?:\d{3})+)(?!\d))|\G\d{3}(?=\d))/$1,/g;
+
+			$info = "$escaped_func (left/right: $samples_txt/$samples_txt2 $countname, $pct%; [$delta/$delta2] $deltapct%/$deltapct2%)";
 		}
 	}
 
@@ -1158,7 +1188,11 @@ while (my ($id, $node) = each %Node) {
 	} elsif ($func eq "-") {
 		$color = $dgrey;
 	} elsif (defined $delta) {
-		$color = color_scale($delta, $maxdelta);
+        if ($diffcallees && defined $delta2) {
+    		$color = color_scale($delta2, $maxdelta2);
+        } else {
+            $color = color_scale($delta, $maxdelta);
+        }
 	} elsif ($palette) {
 		$color = color_map($colors, $func);
 	} else {
