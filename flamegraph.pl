@@ -1174,7 +1174,7 @@ while (my ($id, $node) = each %Node) {
             (my $samples_txt2 = $samples2) # add commas per perlfaq5  
                =~ s/(^[-+]?\d+?(?=(?>(?:\d{3})+)(?!\d))|\G\d{3}(?=\d))/$1,/g;
 
-			$info = "$escaped_func (left/right: $samples_txt/$samples_txt2 $countname, $pct%; [$delta/$delta2] $deltapct%/$deltapct2%)";
+			$info = "$escaped_func (left/right: $samples_txt/$samples_txt2 $countname, $pct%; $delta/$delta2 $deltapct%/$deltapct2%)";
 		}
 	}
 
